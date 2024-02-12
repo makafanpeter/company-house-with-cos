@@ -11,3 +11,7 @@ class Database(object):
     def __init__(self):
         self.__uri = os.getenv('DATABASE_URI')
         self.client = pymongo.MongoClient(self.__uri)
+        self.company_house_db = os.getenv('COMPANYHOUSE_DATABASE')
+
+    def get_company_house_db(self):
+        return self.client[self.company_house_db]
