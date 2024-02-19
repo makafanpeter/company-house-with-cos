@@ -1,4 +1,5 @@
 import os
+import time
 from base64 import b64encode
 
 import requests
@@ -13,6 +14,8 @@ class CompaniesHouseConnector:
     def __init__(self):
         self.base_url = os.environ['COMPANY_HOUSE_BASE_URL']
         self.__api_key = os.environ['API_KEY']
+        self.rate_limit = 600
+        self.rate_limit_reset_time = time.time() + 300  # 5 minutes
 
     def get_auth(self):
         return 'Basic ' + b64encode(f'{self.__api_key}:'.encode('UTF-8')).decode()
@@ -22,7 +25,9 @@ class CompaniesHouseConnector:
         return {
             'Content-Type': 'application/json',
             'Accept': 'application/json',
-            'Authorization': self.get_auth()
+            'Authorization': self.get_auth(),
+            'User-agent': "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+                          "Chrome/121.0.0.0 Safari/537.36"
         }
 
     def search_companies(self, search_term, items_per_page=5, start_index=0):
@@ -37,17 +42,22 @@ class CompaniesHouseConnector:
         Returns:
         - dict: Parsed JSON response from the API.
         """
-        endpoint = f'search?q={search_term}&items_per_page={items_per_page}&start_index={start_index}'
+        if self.__rate_limit_exceeded():
+            print("Rate limit exceeded. Waiting for reset...")
+            self.__rate_limit()
+
+        endpoint = 'search'
         try:
             response = requests.get(
                 url=self.base_url + endpoint,
+                params=dict(q=search_term, items_per_page=items_per_page, start_index=start_index),
                 headers=self.get_request_headers()
             )
+            self.__rate_limit_reset_time(response.headers)
             response.raise_for_status()  # Raise HTTPError for bad responses
             return response.json()
         except requests.exceptions.RequestException as e:
-            print(f"Error during API request: {e}")
-            return None  # Or raise an exception or handle it accordingly
+            self.__handle_api_error(e)
 
     def get_registered_office_address(self, company_number):
         """
@@ -55,19 +65,28 @@ class CompaniesHouseConnector:
         :param company_number:
         :return:
         """
+
+        if self.__rate_limit_exceeded():
+            print("Rate limit exceeded. Waiting for reset...")
+            self.__rate_limit()
+
         endpoint = f'company/{company_number}/registered-office-address'
         try:
             response = requests.get(
                 url=self.base_url + endpoint,
                 headers=self.get_request_headers()
             )
+            self.__rate_limit_reset_time(response.headers)
             response.raise_for_status()  # Raise HTTPError for bad responses
             return response.json()
         except requests.exceptions.RequestException as e:
-            print(f"Error during API request: {e}")
-            return None  # Or raise an exception or handle it accordingly
+            self.__handle_api_error(e)
 
     def get_company_profile(self, company_number):
+
+        if self.__rate_limit_exceeded():
+            print("Rate limit exceeded. Waiting for reset...")
+            self.__rate_limit()
 
         endpoint = f'company/{company_number}'
         try:
@@ -75,11 +94,39 @@ class CompaniesHouseConnector:
                 url=self.base_url + endpoint,
                 headers=self.get_request_headers()
             )
+            self.__rate_limit_reset_time(response.headers)
             response.raise_for_status()  # Raise HTTPError for bad responses
             return response.json()
         except requests.exceptions.RequestException as e:
-            print(f"Error during API request: {e}")
-            return None  # Or raise an exception or handle it accordingly
+            self.__handle_api_error(e)
+
+    def __rate_limit_reset_time(self, headers):
+        remaining_requests = int(headers.get("X-Ratelimit-Remaining", 0))
+        if remaining_requests == 0:
+            reset_timestamp = int(headers.get("X-Ratelimit-Reset", time.time()))
+            self.rate_limit_reset_time = reset_timestamp
+
+    def __rate_limit(self):
+        delta = self.rate_limit_reset_time - time.time()
+        if delta < 0:
+            print("Rate limit exceeded")
+            delta = 300
+        time.sleep(delta)
+
+    def __reset_rate_limit(self, headers={}):
+        reset_timestamp = int(headers.get("X-Ratelimit-Reset", time.time()))
+        self.rate_limit_reset_time = reset_timestamp
+
+    def __rate_limit_exceeded(self):
+        return time.time() > self.rate_limit_reset_time
+
+    def __handle_api_error(self, e):
+        if e.response.status_code == 429:
+            print("Rate limit exceeded. Waiting for reset...")
+            self.__reset_rate_limit(e.response.headers)
+            self.__rate_limit()
+        print(f"Error during API request: {e}")
+        return None  # Or raise an exception or handle it accordingly
 
 
 class CompanyCollection:
@@ -89,14 +136,13 @@ class CompanyCollection:
 
     def add_company(self, company):
         self.companies.append(company)
-        return self
 
     def read_from_csv(self, path):
         try:
             with open(path, 'r') as file:
                 reader = csv.DictReader(file)
                 for row in reader:
-                    self.companies.append({
+                    company = {
                         'name': row.get('Organisation Name', ''),
                         'address': '',
                         'city': row.get('Town/City', ''),
@@ -104,13 +150,15 @@ class CompanyCollection:
                         'post_code': '',
                         'type_and_rating': row.get('Type & Rating', ''),
                         'route': row.get('Route', '')
-                    })
+                    }
+                    self.add_company(company)
         except FileNotFoundError:
             print(f"Error: File not found at path {path}")
         except csv.Error as e:
             print(f"Error reading CSV file at {path}: {e}")
 
     def get_companies(self):
+        self.companies = sorted(self.companies, key=lambda company: company['name'])
         return self.companies
 
 
